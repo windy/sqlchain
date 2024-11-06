@@ -1,9 +1,9 @@
 #! /usr/bin/env python3
-# 
 # @Author: dongxu
 # @Date:   2024-11-06 10:00:00
 # SQLChain
 # A chain of SQL operations with parallel processing support
+
 from typing import (
     Iterator, List, Optional, Any, Dict, Type, Callable, TypeVar, Generic, 
     Tuple, Iterable, AsyncIterator, Union, Sequence
@@ -25,13 +25,16 @@ import logging
 from enum import Enum
 import warnings
 
+import httpx
+from dotenv import load_dotenv
+import os
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s')
 handler = logging.StreamHandler()
 handler.setFormatter(formatter)
 logger.addHandler(handler)
-
 
 # Type variables
 T = TypeVar('T')
@@ -106,6 +109,7 @@ class BaseStream(Generic[T], ABC):
         if self._cached_results is None:
             self._cached_results = list(self._execute())
         return self._cached_results
+
 
 class Stream(BaseStream[T]):
     """Sequential stream processor"""
@@ -348,29 +352,32 @@ class SQLChain:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
         self._type_cache: Dict[str, Type] = {}
+        self._dynamic_classes: Dict[str, Type] = {}  # Add class registry
 
     def _create_dynamic_class(self, result_metadata: List[sa.engine.RowMapping]) -> Type:
         """Create a typed dataclass from query result metadata"""
         if not result_metadata:
             raise ValueError("No metadata available for creating dynamic class")
 
-        fields: List[Tuple[str, Type, None]] = []
-        for key, value in result_metadata[0].items():
-            python_type = type(value) if value is not None else str
-            fields.append((key, python_type, None))
+        # Create a unique key for this metadata structure
+        fields = tuple((key, type(value) if value is not None else str)
+                      for key, value in result_metadata[0].items())
+        class_key = hash(fields)
 
-        # Create the dataclass in the global namespace to make it picklable
+        # Return cached class if it exists
+        if class_key in self._dynamic_classes:
+            return self._dynamic_classes[class_key]
+
+        # Create new class
+        fields_list = [(key, python_type, None) for key, python_type in fields]
         DynamicRecord = make_dataclass(
-            cls_name='DynamicRecord',
-            fields=fields,
-            frozen=True,
-            namespace={'__module__': '__main__'}
+            cls_name=f'DynamicRecord_{class_key}',
+            fields=fields_list,
+            frozen=True
         )
-        
-        # Register the class in the global namespace
-        import sys
-        setattr(sys.modules[__name__], 'DynamicRecord', DynamicRecord)
-        
+
+        # Store in local registry
+        self._dynamic_classes[class_key] = DynamicRecord
         return DynamicRecord
 
     @contextmanager
@@ -407,29 +414,61 @@ class SQLChain:
                 raise SQLExecutionError(f"Query execution failed: {str(e)}") from e
 
         return Stream(source=result_generator())
+
+import threading
+def curl(url: str) -> str:
+    logging.info(f"thread: {threading.get_ident()}")
+    with httpx.Client() as client:
+        response = client.get(url, timeout=30)
+        return response.text
+
+def get_result(chain: SQLChain) -> List[str]:
+    return (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
+            .map(lambda f: f['link'])
+            .filter(lambda link: link is not None and link.startswith('http://'))
+            .map(curl)
+            .collect())
+
+async def get_result_async(chain: SQLChain) -> List[str]:
+    return await (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
+                  .parallel(num_workers=10, chunk_size=10)
+                  .map(lambda f: f['link'])
+                  .filter(lambda link: link is not None and link.startswith('http://'))
+                  .map(curl)
+                  .collect_async())
+
+def get_ca() -> str:
+    # mac
+    if os.path.exists('/etc/ssl/cert.pem'):
+        return '/etc/ssl/cert.pem'
+    # linux
+    elif os.path.exists('/etc/pki/tls/certs/ca-bundle.crt'):
+        return '/etc/pki/tls/certs/ca-bundle.crt'
+    else:
+        return ""
  
-async def example_usage() -> None:
+async def example() -> None:
+    # Load environment variables from .env file
+    load_dotenv()
+
+    db_username = os.getenv('DB_USERNAME')
+    db_password = os.getenv('DB_PASSWORD')
+    db_host = os.getenv('DB_HOST')
+    db_port = os.getenv('DB_PORT')
+    db_database = os.getenv('DB_DATABASE')
+
+    ca = get_ca()
+    
+    # Read database connection details from environment variables
     engine = sa.create_engine(
-        "mysql+pymysql://user:password@host:port/database",
+        f"mysql+pymysql://{db_username}:{db_password}@{db_host}:{db_port}/{db_database}?ssl_verify_cert=true&ssl_verify_identity=true&ssl_ca={ca}",
         pool_size=5,
         max_overflow=10
     )
-    
     try:
         chain = SQLChain(engine)
-        result = await (chain
-            .query("SELECT * FROM hncrawler.feeds limit 100")
-            .parallel(
-                num_workers=10, 
-                chunk_size=5,
-                timeout=10
-            )
-            .map(lambda f: f['link']) 
-            .filter(lambda link: link is not None and link.startswith('http://') )
-            .collect_async()
-        )
-        print(result)
-
+        result = await get_result_async(chain)
+        print(len(result))
     except StreamError as e:
         logger.error(f"Stream processing error: {str(e)}")
     except Exception as e:
@@ -438,4 +477,4 @@ async def example_usage() -> None:
         engine.dispose()
 
 if __name__ == "__main__":
-    asyncio.run(example_usage())
+    asyncio.run(example())
