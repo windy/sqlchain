@@ -18,8 +18,7 @@ import decimal
 from itertools import groupby
 from functools import reduce as functools_reduce
 import asyncio
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 from abc import ABC, abstractmethod
 import logging
 
@@ -146,7 +145,6 @@ class Stream(BaseStream[T]):
         chunk_size: Optional[int] = None,
         timeout: Optional[float] = None
     ) -> 'ParallelStream[T]':
-        """Switch to parallel processing mode"""
         config = ParallelConfig(
             num_workers=num_workers or 1,
             chunk_size=chunk_size or 1000,
@@ -284,7 +282,7 @@ class ParallelStream(BaseStream[T]):
         chunk_args = [(func, chunk) for chunk in chunks]
         
         loop = asyncio.get_event_loop()
-        with ProcessPoolExecutor(max_workers=self.config.num_workers) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.num_workers) as executor:
             try:
                 # Create tasks for parallel processing
                 tasks = [
@@ -312,8 +310,6 @@ class ParallelStream(BaseStream[T]):
 class SQLChain:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
-        self._type_cache: Dict[str, Type] = {}
-        self._dynamic_classes: Dict[str, Type] = {}  # Add class registry
 
     @contextmanager
     def get_connection(self) -> Iterator[Connection]:
@@ -357,6 +353,16 @@ def curl(url: str) -> str:
         logger.error(f"Error fetching URL: {url}, error: {str(e)}")
         return ""
 
+import threading
+def mapfunc(f: Dict[str, Any]) -> int:
+    logger.info(f"map thread_id: {threading.get_ident()}")
+    return len(f['link'])
+
+def reducefunc(x: int, y: int) -> int:
+    logger.info(f"reduce thread_id: {threading.get_ident()}")
+    return x + y
+
+# sync version
 def get_result(chain: SQLChain) -> List[str]:
     return (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
             .map(lambda f: f['link'])
@@ -364,23 +370,15 @@ def get_result(chain: SQLChain) -> List[str]:
             .map(curl)
             .collect())
 
-async def get_result_async(chain: SQLChain) -> List[str]:
+# async version
+async def get_result_async(chain: SQLChain) -> int:
     return await (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
                   .parallel(num_workers=10, chunk_size=10)
                   .filter(lambda f: f.get('link') is not None and f.get('link').startswith('http://'))
-                  .map(lambda f: curl(f.get('link')))
-                  .collect_async())
+                  .map(mapfunc)
+                  .reduce_async(reducefunc, initial=0))
 
-def get_ssl_cert_path() -> str:
-    import platform
-    system = platform.system()
-    if system == 'Darwin':  # macOS
-        return '/private/etc/ssl/cert.pem'
-    elif system == 'Linux':
-        return '/etc/ssl/certs/ca-certificates.crt'
-    else:
-        raise ValueError(f"Unsupported operating system: {system}")
- 
+
 async def example() -> None:
     # Load environment variables from .env file
     load_dotenv()
@@ -390,6 +388,16 @@ async def example() -> None:
     db_host = os.getenv('DB_HOST')
     db_port = os.getenv('DB_PORT')
     db_database = os.getenv('DB_DATABASE')
+
+    def get_ssl_cert_path() -> str:
+        import platform
+        system = platform.system()
+        if system == 'Darwin':  # macOS
+            return '/private/etc/ssl/cert.pem'
+        elif system == 'Linux':
+            return '/etc/ssl/certs/ca-certificates.crt'
+        else:
+            raise ValueError(f"Unsupported operating system: {system}")
 
     ca = get_ssl_cert_path()
     
@@ -402,7 +410,7 @@ async def example() -> None:
     try:
         chain = SQLChain(engine)
         result = await get_result_async(chain)
-        print(len(result))
+        print(result)
     except StreamError as e:
         logger.error(f"Stream processing error: {str(e)}")
     except Exception as e:
