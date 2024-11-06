@@ -1,8 +1,20 @@
 #! /usr/bin/env python3
 # @Author: dongxu
 # @Date:   2024-11-06 10:00:00
+
 # SQLChain
 # A chain of SQL operations with parallel processing support
+
+# Example:
+#  result = await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
+#                   .parallel(num_workers=10, chunk_size=10)
+#                   .map(lambda f: curl(f['link']))
+#                   .collect())
+# Example 2:
+#  result = await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
+#                   .parallel(num_workers=10, chunk_size=10)
+#                   .map(lambda _: 1)
+#                   .reduce(lambda x, y: x + y, initial=0))
 
 import asyncio
 import decimal
@@ -101,13 +113,6 @@ class BaseStream(Generic[T], ABC):
             return result
         except Exception as e:
             raise StreamError(f"Error executing stream: {str(e)}") from e
-
-    async def collect_async(self) -> List[T]:
-        """Collect all elements into a list asynchronously"""
-        if self._cached_results is None:
-            self._cached_results = list(self._execute())
-        return self._cached_results
-
 
 class Stream(BaseStream[T]):
     """Sequential stream processor"""
@@ -269,7 +274,7 @@ class ParallelStream(BaseStream[T]):
         func, chunk = args
         return functools_reduce(func, chunk)
 
-    async def reduce_async(
+    async def reduce(
         self, 
         func: Callable[[T, T], T], 
         initial: Optional[T] = None
@@ -308,6 +313,21 @@ class ParallelStream(BaseStream[T]):
                 self.stats.error_count += 1
                 raise ParallelExecutionError(f"Reduce operation failed: {str(e)}") from e
 
+    async def collect_async(self) -> List[T]:
+        """Collect all elements into a list asynchronously using parallel processing"""
+        if self._cached_results is None:
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor(max_workers=self.config.num_workers) as executor:
+                try:
+                    self._cached_results = await loop.run_in_executor(
+                        executor,
+                        lambda: list(self._execute())
+                    )
+                except Exception as e:
+                    self.stats.error_count += 1
+                    raise ParallelExecutionError(f"Async collection failed: {str(e)}") from e
+        return self._cached_results
+
 class SQLChain:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
@@ -318,12 +338,12 @@ class SQLChain:
         with self.engine.connect() as connection:
             yield connection
 
-    def query(
+    def sql(
         self, 
         sql: str, 
         params: Optional[Dict[str, Any]] = None
     ) -> Stream[Any]:
-        """Execute query and return result stream"""
+        """Execute SQL query and return result stream"""
         def result_generator() -> Iterator[Any]:
             try:
                 with self.get_connection() as conn:
@@ -365,7 +385,7 @@ def reducefunc(x: int, y: int) -> int:
 
 # sync version
 def get_result(chain: SQLChain) -> List[str]:
-    return (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
+    return (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
             .map(lambda f: f['link'])
             .filter(lambda link: link is not None and link.startswith('http://'))
             .map(curl)
@@ -373,11 +393,11 @@ def get_result(chain: SQLChain) -> List[str]:
 
 # async version
 async def get_result_async(chain: SQLChain) -> int:
-    return await (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
+    return await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
                   .parallel(num_workers=10, chunk_size=10)
                   .filter(lambda f: f.get('link') is not None and f.get('link').startswith('http://'))
                   .map(mapfunc)
-                  .reduce_async(reducefunc, initial=0))
+                  .reduce(reducefunc, initial=0))
 
 
 async def example() -> None:
