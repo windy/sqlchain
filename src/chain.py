@@ -4,28 +4,29 @@
 # SQLChain
 # A chain of SQL operations with parallel processing support
 
-from typing import (
-    Iterator, List, Optional, Any, Dict, Type, Callable, TypeVar, Generic, 
-    Tuple, Iterable
-)
-from dataclasses import dataclass 
-from datetime import datetime, date
-import sqlalchemy as sa
-from sqlalchemy.engine import Engine, Connection
-from sqlalchemy.sql import text
-from contextlib import contextmanager
-import decimal
-from itertools import groupby
-from functools import reduce as functools_reduce
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from abc import ABC, abstractmethod
+import decimal
 import logging
+import os
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, date
+from functools import reduce as functools_reduce
+from itertools import groupby
+from typing import (
+    Any, Callable, Dict, Generic, Iterator, Iterable,
+    List, Optional, Tuple, Type, TypeVar
+)
 
 import httpx
+import sqlalchemy as sa
 from dotenv import load_dotenv
-import os
+from sqlalchemy.engine import Engine, Connection
+from sqlalchemy.sql import text
 
+# Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s')
