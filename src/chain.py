@@ -6,9 +6,9 @@
 
 from typing import (
     Iterator, List, Optional, Any, Dict, Type, Callable, TypeVar, Generic, 
-    Tuple, Iterable, AsyncIterator, Union, Sequence
+    Tuple, Iterable
 )
-from dataclasses import make_dataclass, dataclass, field
+from dataclasses import dataclass 
 from datetime import datetime, date
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine, Connection
@@ -22,8 +22,6 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import multiprocessing as mp
 from abc import ABC, abstractmethod
 import logging
-from enum import Enum
-import warnings
 
 import httpx
 from dotenv import load_dotenv
@@ -165,6 +163,10 @@ class Stream(BaseStream[T]):
     def collect(self) -> List[T]:
         """Collect all elements into a list"""
         return list(self._execute())
+    
+    def stats(self) -> ExecutionStats:
+        """Get execution statistics"""
+        return self.stats
 
 class ParallelStream(BaseStream[T]):
     """Parallel stream processor"""
@@ -196,25 +198,6 @@ class ParallelStream(BaseStream[T]):
         predicate, chunk = args
         return [item for item in chunk if predicate(item)]
 
-    async def _retry_operation(
-        self,
-        operation: Callable,
-        args: Any,
-        retry_count: int,
-        retry_delay: float
-    ) -> Any:
-        """Helper function to handle retries with proper async sleep"""
-        while retry_count > 0:
-            try:
-                return operation(args)
-            except Exception as e:
-                retry_count -= 1
-                if retry_count > 0:
-                    warnings.warn(f"Operation failed, retrying: {str(e)}")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    raise
-
     def map(self, func: Callable[[T], R]) -> 'ParallelStream[R]':
         """Transform elements in parallel"""
         def transform(it: Iterator[T]) -> Iterator[R]:
@@ -225,7 +208,6 @@ class ParallelStream(BaseStream[T]):
             chunk_args = [(func, chunk) for chunk in chunks]
             
             with ThreadPoolExecutor(max_workers=self.config.num_workers) as executor:
-                logger.info(f"num_workers: {self.config.num_workers}")
                 try:
                     # Process chunks in parallel using the wrapper function
                     chunk_results = executor.map(
@@ -234,7 +216,6 @@ class ParallelStream(BaseStream[T]):
                         timeout=self.config.timeout
                     )
                     
-                    # Process results
                     for chunk_result in chunk_results:
                         yield from chunk_result
                         self.stats.processed_items += len(chunk_result)
@@ -329,56 +310,10 @@ class ParallelStream(BaseStream[T]):
                 raise ParallelExecutionError(f"Reduce operation failed: {str(e)}") from e
 
 class SQLChain:
-    TYPE_MAPPING: Dict[str, Type] = {
-        'int': int,
-        'bigint': int,
-        'tinyint': int,
-        'smallint': int,
-        'mediumint': int,
-        'float': float,
-        'double': float,
-        'decimal': decimal.Decimal,
-        'char': str,
-        'varchar': str,
-        'text': str,
-        'datetime': datetime,
-        'timestamp': datetime,
-        'date': date,
-        'time': str,
-        'boolean': bool,
-        'bool': bool,
-    }
-
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
         self._type_cache: Dict[str, Type] = {}
         self._dynamic_classes: Dict[str, Type] = {}  # Add class registry
-
-    def _create_dynamic_class(self, result_metadata: List[sa.engine.RowMapping]) -> Type:
-        """Create a typed dataclass from query result metadata"""
-        if not result_metadata:
-            raise ValueError("No metadata available for creating dynamic class")
-
-        # Create a unique key for this metadata structure
-        fields = tuple((key, type(value) if value is not None else str)
-                      for key, value in result_metadata[0].items())
-        class_key = hash(fields)
-
-        # Return cached class if it exists
-        if class_key in self._dynamic_classes:
-            return self._dynamic_classes[class_key]
-
-        # Create new class
-        fields_list = [(key, python_type, None) for key, python_type in fields]
-        DynamicRecord = make_dataclass(
-            cls_name=f'DynamicRecord_{class_key}',
-            fields=fields_list,
-            frozen=True
-        )
-
-        # Store in local registry
-        self._dynamic_classes[class_key] = DynamicRecord
-        return DynamicRecord
 
     @contextmanager
     def get_connection(self) -> Iterator[Connection]:
@@ -401,26 +336,26 @@ class SQLChain:
                     if not rows:
                         return
 
-                    # Convert rows to dictionaries first
                     for row in rows:
                         row_dict = dict(row)
-                        # Convert any non-serializable types to strings
                         for key, value in row_dict.items():
                             if isinstance(value, (datetime, date, decimal.Decimal)):
                                 row_dict[key] = str(value)
-                        yield row_dict  # Yield dictionary instead of DynamicRecord
+                        yield row_dict
 
             except Exception as e:
                 raise SQLExecutionError(f"Query execution failed: {str(e)}") from e
 
         return Stream(source=result_generator())
 
-import threading
 def curl(url: str) -> str:
-    logging.info(f"thread: {threading.get_ident()}")
-    with httpx.Client() as client:
-        response = client.get(url, timeout=30)
-        return response.text
+    try:
+        with httpx.Client() as client:
+            response = client.get(url, timeout=30)
+            return response.text
+    except Exception as e:
+        logger.error(f"Error fetching URL: {url}, error: {str(e)}")
+        return ""
 
 def get_result(chain: SQLChain) -> List[str]:
     return (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
@@ -432,20 +367,19 @@ def get_result(chain: SQLChain) -> List[str]:
 async def get_result_async(chain: SQLChain) -> List[str]:
     return await (chain.query("SELECT * FROM hncrawler.feeds limit 5000")
                   .parallel(num_workers=10, chunk_size=10)
-                  .map(lambda f: f['link'])
-                  .filter(lambda link: link is not None and link.startswith('http://'))
-                  .map(curl)
+                  .filter(lambda f: f.get('link') is not None and f.get('link').startswith('http://'))
+                  .map(lambda f: curl(f.get('link')))
                   .collect_async())
 
-def get_ca() -> str:
-    # mac
-    if os.path.exists('/etc/ssl/cert.pem'):
-        return '/etc/ssl/cert.pem'
-    # linux
-    elif os.path.exists('/etc/pki/tls/certs/ca-bundle.crt'):
-        return '/etc/pki/tls/certs/ca-bundle.crt'
+def get_ssl_cert_path() -> str:
+    import platform
+    system = platform.system()
+    if system == 'Darwin':  # macOS
+        return '/private/etc/ssl/cert.pem'
+    elif system == 'Linux':
+        return '/etc/ssl/certs/ca-certificates.crt'
     else:
-        return ""
+        raise ValueError(f"Unsupported operating system: {system}")
  
 async def example() -> None:
     # Load environment variables from .env file
@@ -457,7 +391,7 @@ async def example() -> None:
     db_port = os.getenv('DB_PORT')
     db_database = os.getenv('DB_DATABASE')
 
-    ca = get_ca()
+    ca = get_ssl_cert_path()
     
     # Read database connection details from environment variables
     engine = sa.create_engine(
