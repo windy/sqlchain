@@ -3,14 +3,14 @@
 # @Date:   2024-11-06 10:00:00
 
 # SQLChain
-# A chain of SQL operations with parallel processing support
+# A chain-style SQL processing library with parallel support
 
-# Example:
+# Example 1, curl each link and get the html text
 #  result = await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
 #                   .parallel(num_workers=10, chunk_size=10)
 #                   .map(lambda f: curl(f['link']))
 #                   .collect())
-# Example 2:
+# Example 2, count the number of links
 #  result = await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
 #                   .parallel(num_workers=10, chunk_size=10)
 #                   .map(lambda _: 1)
@@ -37,6 +37,11 @@ import sqlalchemy as sa
 from dotenv import load_dotenv
 from sqlalchemy.engine import Engine, Connection
 from sqlalchemy.sql import text
+from bs4 import BeautifulSoup
+
+import ai
+
+llm = ai.LLM()
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -152,7 +157,7 @@ class Stream(BaseStream[T]):
         timeout: Optional[float] = None
     ) -> 'ParallelStream[T]':
         config = ParallelConfig(
-            num_workers=num_workers or 1,
+            num_workers=num_workers or os.cpu_count() - 1,
             chunk_size=chunk_size or 1000,
             timeout=timeout
         )
@@ -313,7 +318,7 @@ class ParallelStream(BaseStream[T]):
                 self.stats.error_count += 1
                 raise ParallelExecutionError(f"Reduce operation failed: {str(e)}") from e
 
-    async def collect_async(self) -> List[T]:
+    async def collect(self) -> List[T]:
         """Collect all elements into a list asynchronously using parallel processing"""
         if self._cached_results is None:
             loop = asyncio.get_event_loop()
@@ -365,15 +370,6 @@ class SQLChain:
 
         return Stream(source=result_generator())
 
-def curl(url: str) -> str:
-    try:
-        with httpx.Client() as client:
-            response = client.get(url, timeout=30)
-            return response.text
-    except Exception as e:
-        logger.error(f"Error fetching URL: {url}, error: {str(e)}")
-        return ""
-
 import threading
 def mapfunc(f: Dict[str, Any]) -> int:
     logger.info(f"map thread_id: {threading.get_ident()}")
@@ -388,7 +384,6 @@ def get_result(chain: SQLChain) -> List[str]:
     return (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
             .map(lambda f: f['link'])
             .filter(lambda link: link is not None and link.startswith('http://'))
-            .map(curl)
             .collect())
 
 # async version
@@ -429,9 +424,33 @@ async def example() -> None:
         max_overflow=10
     )
     try:
+
+        def summary(item: Tuple[int, str]) -> Tuple[int, str]:
+            try:
+                with httpx.Client() as client:
+                    response = client.get(item[1], timeout=30)
+                    html = response.text
+                    soup = BeautifulSoup(html, 'html.parser')
+                    html_text = soup.get_text()
+
+                    resp = llm.ask(chat_history=[
+                        {"role": "system", "content": "You are a helpful assistant. try to summarize the following text into a short summary in Chinese."},
+                        {"role": "user", "content": html_text}
+                    ])["content"]
+                    logger.info(f"summary for {item[0]}: {resp}")
+                    return (item[0], resp)
+            except Exception as e:
+                logger.error(f"Error fetching URL: {item[0]}, {item[1]}, error: {str(e)}")
+                return (item[0], "")
+
         chain = SQLChain(engine)
-        result = await get_result_async(chain)
-        print(result)
+        result = await (chain.sql("SELECT * FROM hncrawler.feeds limit 10")
+                        .parallel(num_workers=os.cpu_count() - 1, chunk_size=1)
+                        .map(lambda feed: summary((feed['id'], feed['link'])))
+                        .collect())
+
+        logger.info(result)
+
     except StreamError as e:
         logger.error(f"Stream processing error: {str(e)}")
     except Exception as e:
