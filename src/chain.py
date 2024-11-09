@@ -15,6 +15,31 @@
 #                   .parallel(num_workers=10, chunk_size=10)
 #                   .map(lambda _: 1)
 #                   .reduce(lambda x, y: x + y, initial=0))
+#
+# Example 3, map and reduce
+# import threading
+# def mapfunc(f: Dict[str, Any]) -> int:
+#     logger.info(f"map thread_id: {threading.get_ident()}")
+#     return len(f['link'])
+# 
+# def reducefunc(x: int, y: int) -> int:
+#     logger.info(f"reduce thread_id: {threading.get_ident()}")
+#     return x + y
+# 
+# # sync version
+# def get_result(chain: SQLChain) -> List[str]:
+#     return (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
+#             .map(lambda f: f['link'])
+#             .filter(lambda link: link is not None and link.startswith('http://'))
+#             .collect())
+# 
+# # async version
+# async def get_result_async(chain: SQLChain) -> int:
+#     return await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
+#                   .parallel(num_workers=10, chunk_size=10)
+#                   .filter(lambda f: f.get('link') is not None and f.get('link').startswith('http://'))
+#                   .map(mapfunc)
+#                   .reduce(reducefunc, initial=0))
 
 import asyncio
 import decimal
@@ -41,7 +66,7 @@ from bs4 import BeautifulSoup
 
 import ai
 
-llm = ai.LLM()
+llm = ai.LLM(os.getenv("OLLAMA_URL"))
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -121,7 +146,7 @@ class BaseStream(Generic[T], ABC):
 
 class Stream(BaseStream[T]):
     """Sequential stream processor"""
-    
+
     def map(self, func: Callable[[T], R]) -> 'Stream[R]':
         """Transform elements using the provided function"""
         return Stream(
@@ -143,7 +168,7 @@ class Stream(BaseStream[T]):
         def transform(items: Iterable[T]) -> Iterator[Tuple[K, List[T]]]:
             sorted_items = sorted(items, key=key)
             return ((k, list(g)) for k, g in groupby(sorted_items, key=key))
-            
+
         return Stream(
             source=self.source,
             transforms=self.transforms + [transform],
@@ -161,7 +186,7 @@ class Stream(BaseStream[T]):
             chunk_size=chunk_size or 1000,
             timeout=timeout
         )
-        
+
         return ParallelStream(
             source=self.source,
             transforms=self.transforms,
@@ -370,31 +395,6 @@ class SQLChain:
 
         return Stream(source=result_generator())
 
-import threading
-def mapfunc(f: Dict[str, Any]) -> int:
-    logger.info(f"map thread_id: {threading.get_ident()}")
-    return len(f['link'])
-
-def reducefunc(x: int, y: int) -> int:
-    logger.info(f"reduce thread_id: {threading.get_ident()}")
-    return x + y
-
-# sync version
-def get_result(chain: SQLChain) -> List[str]:
-    return (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
-            .map(lambda f: f['link'])
-            .filter(lambda link: link is not None and link.startswith('http://'))
-            .collect())
-
-# async version
-async def get_result_async(chain: SQLChain) -> int:
-    return await (chain.sql("SELECT * FROM hncrawler.feeds limit 5000")
-                  .parallel(num_workers=10, chunk_size=10)
-                  .filter(lambda f: f.get('link') is not None and f.get('link').startswith('http://'))
-                  .map(mapfunc)
-                  .reduce(reducefunc, initial=0))
-
-
 async def example() -> None:
     # Load environment variables from .env file
     load_dotenv()
@@ -420,36 +420,69 @@ async def example() -> None:
     # Read database connection details from environment variables
     engine = sa.create_engine(
         f"mysql+pymysql://{db_username}:{db_password}@{db_host}:{db_port}/{db_database}?ssl_verify_cert=true&ssl_verify_identity=true&ssl_ca={ca}",
-        pool_size=5,
+        pool_size=10,
         max_overflow=10
     )
     try:
 
-        def summary(item: Tuple[int, str]) -> Tuple[int, str]:
+        def update_summary(engine: Engine, item: Tuple[int, str]) -> Tuple[int, str]:
+            feed_id = item[0]
+            summary = item[1]
+            sql = """INSERT INTO `summary` (`id`, `summary`) 
+                     VALUES (:id, :summary) 
+                     ON DUPLICATE KEY UPDATE `summary` = VALUES(`summary`);"""
+            with engine.connect() as conn:
+                conn.execute(text(sql), {"id": feed_id, "summary": summary})
+                conn.commit()
+            return item
+
+        def load_processed(engine: Engine) -> Dict[int, bool]:
+            logger.info("Loading processed feeds")
+            sql = "select id from summary;"
+            with engine.connect() as conn:
+                result = conn.execute(text(sql))
+                return {row['id']: True for row in result.mappings().all()}
+        
+        processed_feeds = load_processed(engine)
+
+        def check_processed(feed_id: int) -> bool:
+            return feed_id in processed_feeds
+
+        def summary(engine: Engine, item: Tuple[int, str]) -> Tuple[int, str]:
+            feed_id = item[0]
+            link = item[1]
+            if not link:
+                logger.info(f"Feed {feed_id} has no link, skip")
+                return (feed_id, "")
+            if check_processed(feed_id):
+                logger.info(f"Feed {feed_id} already processed, skip")
+                return (feed_id, "")
             try:
                 with httpx.Client() as client:
-                    response = client.get(item[1], timeout=30)
+                    response = client.get(link, timeout=30)
                     html = response.text
                     soup = BeautifulSoup(html, 'html.parser')
                     html_text = soup.get_text()
 
                     resp = llm.ask(chat_history=[
-                        {"role": "system", "content": "You are a helpful assistant. try to summarize the following text into a short summary in Chinese."},
-                        {"role": "user", "content": html_text}
-                    ])["content"]
-                    logger.info(f"summary for {item[0]}: {resp}")
-                    return (item[0], resp)
+                        {"role": "system", "content": "You are a helpful assistant. try to summarize the following text into a short summary in Chinese, 使用中文!"},
+                        {"role": "user", "content": html_text[:100 * 1024]}
+                    ], model="qwen2.5")["content"]
+                    update_summary(engine, (feed_id, resp))
+                    return (feed_id, resp)
             except Exception as e:
-                logger.error(f"Error fetching URL: {item[0]}, {item[1]}, error: {str(e)}")
-                return (item[0], "")
+                logger.error(f"Error fetching URL: {feed_id}, {link}, error: {str(e)}")
+                return (feed_id, "")
 
         chain = SQLChain(engine)
-        result = await (chain.sql("SELECT * FROM hncrawler.feeds limit 10")
-                        .parallel(num_workers=os.cpu_count() - 1, chunk_size=1)
-                        .map(lambda feed: summary((feed['id'], feed['link'])))
+        today_feeds_sql = "select * from feeds where date(created_at) = CURRENT_DATE;"
+        all_feeds_sql = "select * from feeds order by created_at desc;"
+        result = await (chain.sql(all_feeds_sql)
+                        .parallel(num_workers=os.cpu_count() - 1, chunk_size=5)
+                        .map(lambda feed: summary(engine, (feed['id'], feed['link'])))
                         .collect())
 
-        logger.info(result)
+        logger.info(f"Processed {len(result)} feeds")
 
     except StreamError as e:
         logger.error(f"Stream processing error: {str(e)}")

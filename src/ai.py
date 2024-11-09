@@ -14,9 +14,12 @@ def url_to_md(url : str) -> str:
     return resp.text
 
 class LLM:
-    def __init__(self):
+    def __init__(self, ollama_url: str = None):
         self.openai_key = os.getenv("OPENAI_API_KEY")
-        self.client = OpenAI(api_key=self.openai_key)
+        if ollama_url:
+            self.client = OpenAI(api_key='ollama', base_url=ollama_url)
+        else:
+            self.client = OpenAI(api_key=self.openai_key)
 
     def ask(self, 
                 chat_history: list[str],
@@ -47,7 +50,11 @@ class LLM:
         return {"content": response.choices[0].message.content, "role": "assistant"}
 
 if __name__ == "__main__":
-    llm = LLM()
+    if os.getenv("OLLAMA_URL"):
+        print("using ollama")
+        llm = LLM(os.getenv("OLLAMA_URL"))
+    else:
+        llm = LLM()
     # read from stdin, make a conversation
     chat_history = []
     while True:
@@ -57,6 +64,6 @@ if __name__ == "__main__":
         if line.startswith("http"):
             line = url_to_md(line) + f"\n\n---\n\nhere is the markdown content of the url: {line}, wait for the user to ask about it in next line"
         chat_history.append({"role": "user", "content": line})
-        resp = llm.ask(chat_history)
+        resp = llm.ask(chat_history, model="qwen2.5")
         print("assistant> ", resp["content"])
         chat_history.append(resp)
