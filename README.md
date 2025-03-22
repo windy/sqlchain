@@ -1,165 +1,143 @@
-# SQLChain
+# LLM and SQLChain Project
 
-<img src="https://img.shields.io/badge/Version-1.0.0-blue.svg" alt="Version Badge">
-<img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License Badge">
-
-SQLChain is a lightweight and efficient chain-style data processing library for SQL databases. It enables you to process data from SQL queries using fluent, chainable operations with built-in support for parallel processing.
+## Project Overview
+This project demonstrates the integration of a Language Model (LLM) with SQLChain, a library for processing SQL database queries in a chainable manner. It showcases how to use LLMs for natural language to SQL conversion and how to combine this with SQLChain for efficient data processing.
 
 ## Features
+- **LLM Integration**: Uses LLMs (like OpenAI) to convert natural language queries into SQL.
+- **SQLChain**: Processes SQL queries using chainable operations with support for parallel processing.
+- **Examples**: Includes example code demonstrating basic LLM usage, SQLChain operations, and their combined use.
+- **Tests**: Comprehensive unit and integration tests to ensure code correctness.
 
-- **Fluent API**: Chain operations together in a readable and expressive syntax
-- **Parallel Processing**: Built-in support for parallel execution of operations
-- **SQL Integration**: Direct integration with SQL databases via SQLAlchemy
-- **Type Safety**: Generic type support for better IDE assistance and safer code
-- **Async Support**: Async operations for non-blocking execution of parallel workloads
-- **Error Handling**: Comprehensive error handling with custom exceptions
+## Installation and Setup
 
-## Requirements
-
+### Prerequisites
 - Python 3.12+
-- Required packages:
-  - sqlalchemy
-  - pymysql
-  - httpx
-  - python-dotenv
-  - beautifulsoup4
-  - openai
+- pip package installer
 
-## Installation
+### Steps
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository_url>
+    cd <repository_directory>
+    ```
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/yourusername/sqlchain.git
-   cd sqlchain
-   ```
+2.  **Create a virtual environment:**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate   # On Windows: venv\Scripts\activate
+    ```
 
-2. Create a virtual environment:
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+3.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    (Create a `requirements.txt` file with the following content):
+    ```text
+    openai
+    httpx
+    python-dotenv
+    sqlalchemy
+    pymysql
+    beautifulsoup4
+    ```
 
-3. Install dependencies:
-   ```
-   pip install openai httpx python-dotenv sqlalchemy pymysql beautifulsoup4
-   ```
+4.  **Configure environment variables:**
 
-## Configuration
+    *   Create a `.env` file in the project root.
+    *   Add the following variables with your actual credentials:
 
-Create a `.env` file in your project root with the following variables:
+        ```
+        OPENAI_API_KEY=your_openai_api_key
+        DB_HOST=localhost
+        DB_PORT=3306
+        DB_USERNAME=your_db_username
+        DB_PASSWORD=your_db_password
+        DB_DATABASE=your_db_name
+        ```
 
-```
-DB_USERNAME=your_username
-DB_PASSWORD=your_password
-DB_HOST=your_host
-DB_PORT=3306
-DB_DATABASE=your_database
-OPENAI_API_KEY=your_openai_key
-OLLAMA_URL=your_ollama_url  # Optional, if using Ollama
-```
+## Running Examples
 
-## Usage Examples
+1.  **Navigate to the project directory:**
+    ```bash
+    cd <repository_directory>
+    ```
 
-### Basic SQL Query and Processing
+2.  **Run the examples:**
+    ```bash
+    python examples.py <example_name>
+    ```
+    *   Replace `<example_name>` with one of the following:
+        *   `llm_basic`: Basic LLM query.
+        *   `llm_conversation`: LLM conversation example.
+        *   `llm_json`: LLM JSON mode example.
+        *   `sql_basic`: Basic SQLChain example.
+        *   `sql_transform`: SQLChain transform example.
+        *   `sql_async`: Async SQLChain example.
+        *   `llm_to_sql`: LLM generating SQL for SQLChain.
+        *   `nl_query`: Natural language database query example.
+    *   To run all examples:
+        ```bash
+        python examples.py all
+        ```
 
-```python
-from sqlchain import SQLChain
-import sqlalchemy as sa
+## Running Tests
 
-# Create database engine
-engine = sa.create_engine("mysql+pymysql://user:password@localhost/dbname")
-chain = SQLChain(engine)
+1.  **Ensure you have the necessary testing libraries:**
+    ```bash
+    pip install unittest
+    ```
 
-# Execute SQL query and collect results
-results = (chain.sql("SELECT * FROM users WHERE active = 1")
-           .map(lambda user: user['name'].upper())
-           .filter(lambda name: len(name) > 5)
-           .collect())
+2.  **Run the tests:**
+    ```bash
+    python tests.py
+    ```
+    *   This will execute all unit and integration tests defined in `tests.py`.
 
-print(results)
-```
+## Basic Usage Guide
 
-### Parallel Processing with Async
+### LLM Examples (from `examples.py`)
 
-```python
-import asyncio
+*   **Basic LLM Query:**
+    ```python
+    llm = LLM()
+    response = llm.ask(["What is SQLAlchemy?"])
+    print(response['content'])
+    ```
 
-async def process_data():
-    # Process data in parallel with 10 workers
-    total_length = await (chain.sql("SELECT * FROM articles")
-                         .parallel(num_workers=10, chunk_size=20)
-                         .map(lambda article: len(article['content']))
-                         .reduce(lambda x, y: x + y, initial=0))
-    
-    print(f"Total content length: {total_length}")
+*   **SQLChain Basic Example:**
+    ```python
+    engine = setup_database_engine()
+    chain = SQLChain(engine)
+    results = chain.sql("SELECT * FROM users LIMIT 5").collect()
+    print(results)
+    ```
 
-# Run the async function
-asyncio.run(process_data())
-```
+*   **Combined LLM and SQLChain Example:**
+    ```python
+    llm = LLM()
+    engine = setup_database_engine()
+    chain = SQLChain(engine)
+    schema_info = "Table: users - id (INT), username (VARCHAR), email (VARCHAR)"
+    natural_query = "Find all active users"
+    prompt = f"Generate SQL query for: {natural_query} based on {schema_info}"
+    sql_response = llm.ask([prompt])
+    results = chain.sql(sql_response['content']).collect()
+    print(results)
+    ```
 
-### Group By Operation
+## Notes and Limitations
 
-```python
-# Group users by country and collect results
-country_groups = (chain.sql("SELECT * FROM users")
-                  .group_by(lambda user: user['country'])
-                  .collect())
+*   **Security**: Exercise caution when using LLMs to generate SQL queries. Always validate and sanitize the generated SQL before execution to prevent SQL injection attacks.
+*   **Database Schema**: The LLM's ability to generate accurate SQL depends on the quality and completeness of the provided database schema information.
+*   **Error Handling**: Ensure robust error handling is implemented to manage potential issues with LLM API calls and database operations.
 
-for country, users in country_groups:
-    print(f"{country}: {len(users)} users")
-```
+## Contributing
 
-## API Documentation
+Contributions are welcome! Please follow these guidelines:
 
-### SQLChain
-
-The main entry point for SQL-based operations.
-
-```python
-chain = SQLChain(engine)
-stream = chain.sql("SELECT * FROM table", params={"param": value})
-```
-
-**Methods**:
-- `sql(sql_query, params=None)`: Executes SQL query and returns a Stream of results
-
-### Stream
-
-Sequential stream processor for data operations.
-
-**Methods**:
-- `map(func)`: Apply function to each element
-- `filter(predicate)`: Filter elements by predicate
-- `group_by(key_func)`: Group elements by key function
-- `parallel(num_workers, chunk_size, timeout)`: Convert to parallel stream
-- `collect()`: Collect all elements into a list
-- `stats()`: Get execution statistics
-
-### ParallelStream
-
-Parallel stream processor for concurrent data operations.
-
-**Methods**:
-- `map(func)`: Apply function to each element in parallel
-- `filter(predicate)`: Filter elements by predicate in parallel
-- `reduce(func, initial=None)`: Reduce elements using function in parallel
-- `collect()`: Collect all elements into a list asynchronously
-
-## Error Handling
-
-SQLChain provides custom exceptions for better error handling:
-
-```python
-from sqlchain import StreamError, SQLExecutionError, ParallelExecutionError
-
-try:
-    results = chain.sql("SELECT * FROM nonexistent_table").collect()
-except SQLExecutionError as e:
-    print(f"SQL error: {e}")
-except StreamError as e:
-    print(f"Stream processing error: {e}")
-```
-
-## License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+1.  Fork the repository.
+2.  Create a new branch for your feature or bug fix.
+3.  Write tests for your changes.
+4.  Ensure all tests pass.
+5.  Submit a pull request.
